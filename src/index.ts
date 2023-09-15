@@ -7,137 +7,51 @@ import {
   bundlrStorage,
   toMetaplexFile,
 } from "@metaplex-foundation/js"
-import { DataV2, createCreateMetadataAccountV3Instruction, createUpdateMetadataAccountInstruction } from '@metaplex-foundation/mpl-token-metadata';
+import { DataV2, createCreateMetadataAccountV2Instruction, createCreateMetadataAccountV3Instruction, createUpdateMetadataAccountInstruction } from '@metaplex-foundation/mpl-token-metadata';
 
 import * as fs from "fs"
+import { createInitializeMintInstruction } from "@solana/spl-token";
 
-async function createNewMint(
-  connection: web3.Connection,
-  payer: web3.Keypair,
-  mintAuthority: web3.PublicKey,
-  freezeAuthority: web3.PublicKey,
-  decimals: number
-): Promise<web3.PublicKey> {
+const tokenName = "Moldova coin"
+const description = "Description"
+const symbol = "MDLC"
+const decimals = 2
+const amount = 100
 
-  const tokenMint = await token.createMint(
-      connection,
-      payer,
-      mintAuthority,
-      freezeAuthority,
-      decimals
-  );
+async function main() {
+  const connection = new web3.Connection(web3.clusterApiUrl("devnet"))
+  const user = await initializeKeypair(connection)
 
-  console.log(`The token mint account address is ${tokenMint}`)
-  console.log(
-      `Token Mint: https://explorer.solana.com/address/${tokenMint}?cluster=devnet`
-  );
+  console.log("PublicKey:", user.publicKey.toBase58())
 
-  return tokenMint;
-}
+  // rent for token mint
+  const lamports = await token.getMinimumBalanceForRentExemptMint(connection)
 
-async function createTokenAccount(
-  connection: web3.Connection,
-  payer: web3.Keypair,
-  mint: web3.PublicKey,
-  owner: web3.PublicKey
-) {
-  const tokenAccount = await token.getOrCreateAssociatedTokenAccount(
-      connection,
-      payer,
-      mint,
-      owner
-  )
-  
-  console.log(
-      `Token Account: https://explorer.solana.com/address/${tokenAccount.address}?cluster=devnet`
-  )
+  // keypair for new token mint
+  const mintKeypair = web3.Keypair.generate()
 
-  return tokenAccount
-}
-
-async function mintTokens(
-  connection: web3.Connection,
-  payer: web3.Keypair,
-  mint: web3.PublicKey,
-  destination: web3.PublicKey,
-  authority: web3.Keypair,
-  amount: number
-) {
-  const mintInfo = await token.getMint(connection, mint)
-
-  const transactionSignature = await token.mintTo(
-    connection,
-    payer,
-    mint,
-    destination,
-    authority,
-    amount * 10 ** mintInfo.decimals
-  )
-
-  console.log(
-    `Mint Token Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-  )
-}
-
-async function transferTokens(
-  connection: web3.Connection,
-  payer: web3.Keypair,
-  source: web3.PublicKey,
-  destination: web3.PublicKey,
-  owner: web3.PublicKey,
-  amount: number,
-  mint: web3.PublicKey
-) {
-  const mintInfo = await token.getMint(connection, mint)
-
-  const transactionSignature = await token.transfer(
-    connection,
-    payer,
-    source,
-    destination,
-    owner,
-    amount * 10 ** mintInfo.decimals
-  )
-
-  console.log(
-    `Transfer Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-  )
-}
-
-async function burnTokens(
-    connection: web3.Connection,
-    payer: web3.Keypair,
-    account: web3.PublicKey,
-    mint: web3.PublicKey,
-    owner: web3.Keypair,
-    amount: number
-) {
-
-    const mintInfo = await token.getMint(connection, mint)
-    
-    const transactionSignature = await token.burn(
-        connection,
-        payer,
-        account,
-        mint,
-        owner,
-        amount * 10 ** mintInfo.decimals
+  // metaplex setup
+  const metaplex = Metaplex.make(connection)
+    .use(keypairIdentity(user))
+    .use(
+      bundlrStorage({
+        address: "https://devnet.bundlr.network",
+        providerUrl: "https://api.devnet.solana.com",
+        timeout: 60000,
+      })
     )
 
-    console.log(
-        `Burn Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-    )
-}
+  // get metadata PDA for token mint
+  const metadataPDA = metaplex.nfts().pdas().metadata({
+    mint: mintKeypair.publicKey
+})
 
-async function createTokenMetadata(
-  connection: web3.Connection,
-  metaplex: Metaplex,
-  mint: web3.PublicKey,
-  user: web3.Keypair,
-  name: string,
-  symbol: string,
-  description: string
-) {
+  // get associated token account address for use
+  const tokenATA = await token.getAssociatedTokenAddress(
+    mintKeypair.publicKey,
+    user.publicKey
+  )
+
   // file to buffer
   const buffer = fs.readFileSync("assets/mdlc.png")
 
@@ -152,33 +66,47 @@ async function createTokenMetadata(
   const { uri } = await metaplex
     .nfts()
     .uploadMetadata({
-      name: name,
+      name: tokenName,
       description: description,
       image: imageUri,
     })
- 
-  console.log("metadata uri:", uri)
 
-  // get metadata account address
-  const metadataPDA = metaplex.nfts().pdas().metadata({mint})
+  console.log("metadata uri:", uri)
 
   // onchain metadata format
   const tokenMetadata = {
-    name: name,
+    name: tokenName,
     symbol: symbol,
     uri: uri,
     sellerFeeBasisPoints: 0,
     creators: null,
     collection: null,
-    uses: null
+    uses: null,
   } as DataV2
 
   // transaction to create metadata account
   const transaction = new web3.Transaction().add(
+    // create new account
+    web3.SystemProgram.createAccount({
+      fromPubkey: user.publicKey,
+      newAccountPubkey: mintKeypair.publicKey,
+      space: token.MINT_SIZE,
+      lamports: lamports,
+      programId: token.TOKEN_PROGRAM_ID,
+    }),
+    // create new token mint
+    createInitializeMintInstruction(
+      mintKeypair.publicKey,
+      decimals,
+      user.publicKey,
+      user.publicKey,
+      token.TOKEN_PROGRAM_ID
+    ),
+    // create metadata account
     createCreateMetadataAccountV3Instruction(
       {
         metadata: metadataPDA,
-        mint: mint,
+        mint: mintKeypair.publicKey,
         mintAuthority: user.publicKey,
         payer: user.publicKey,
         updateAuthority: user.publicKey,
@@ -193,69 +121,42 @@ async function createTokenMetadata(
     )
   )
 
-  // send transaction
-  const transactionSignature = await web3.sendAndConfirmTransaction(
-    connection,
-    transaction,
-    [user]
+  // instruction to create ATA
+  const createTokenAccountInstruction = token.createAssociatedTokenAccountInstruction(
+    user.publicKey, // payer
+    tokenATA, // token address
+    user.publicKey, // token owner
+    mintKeypair.publicKey // token mint
   )
 
-  console.log(
-    `Create Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
-  )
-}
+  let tokenAccount: token.Account
+  try {
+    // check if token account already exists
+    tokenAccount = await token.getAccount(
+      connection, // connection
+      tokenATA // token address
+    )
+  } catch (error: unknown) {
+    if (
+      error instanceof token.TokenAccountNotFoundError ||
+      error instanceof token.TokenInvalidAccountOwnerError
+    ) {
+      try {
+        // add instruction to create token account if one does not exist
+        transaction.add(createTokenAccountInstruction)
+      } catch (error: unknown) {}
+    } else {
+      throw error
+    }
+  }
 
-async function updateTokenMetadata(
-  connection: web3.Connection,
-  metaplex: Metaplex,
-  mint: web3.PublicKey,
-  user: web3.Keypair,
-  name: string,
-  symbol: string,
-  description: string
-) {
-  // file to buffer
-  const buffer = fs.readFileSync("assets/mdlc.png")
-
-  // buffer to metaplex file
-  const file = toMetaplexFile(buffer, "mdlc.png")
-
-  // upload image and get image uri
-  const imageUri = await metaplex.storage().upload(file)
-  console.log("image uri:", imageUri)
-
-  // upload metadata and get metadata uri (off chain metadata)
-  const { uri } = await metaplex
-    .nfts()
-    .uploadMetadata({
-      name: name,
-      description: description,
-      image: imageUri,
-    })
- 
-  console.log("metadata uri:", uri)
-
-  // get metadata account address
-  const metadataPDA = metaplex.nfts().pdas().metadata({mint})
-
-  // onchain metadata format
-  const tokenMetadata = {
-    name: name,
-    symbol: symbol,
-    uri: uri,
-    sellerFeeBasisPoints: 0,
-    creators: null,
-    collection: null,
-    uses: null
-  } as DataV2
-
-  // transaction to create metadata account
-  const transaction = new web3.Transaction().add(
-    createUpdateMetadataAccountInstruction(
-      {
-        metadata: metadataPDA,
-        updateAuthority: user.publicKey,
-      }
+  transaction.add(
+    // mint tokens to token account
+    token.createMintToInstruction(
+      mintKeypair.publicKey,
+      tokenATA,
+      user.publicKey,
+      amount * Math.pow(10, decimals)
     )
   )
 
@@ -263,104 +164,12 @@ async function updateTokenMetadata(
   const transactionSignature = await web3.sendAndConfirmTransaction(
     connection,
     transaction,
-    [user]
+    [user, mintKeypair]
   )
 
   console.log(
-    `Create Metadata Account: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
+    `Transaction: https://explorer.solana.com/tx/${transactionSignature}?cluster=devnet`
   )
-}
-
-async function main() {
-  const connection = new web3.Connection(web3.clusterApiUrl("devnet"))
-  const user = await initializeKeypair(connection)
-
-  // const mint = await createNewMint(
-  //   connection,
-  //   user,           // We'll pay the fees
-  //   user.publicKey, // We're the mint authority
-  //   user.publicKey, // And the freeze authority >:)
-  //   2               // Only two decimals!
-  // )
-
-  // const tokenAccount = await createTokenAccount(
-  //   connection,     
-  //   user,           
-  //   mint,            
-  //   user.publicKey   // Associating our address with the token account
-  // )
-  
-  // // Mint 100 tokens to our address
-  // await mintTokens(connection, user, mint, tokenAccount.address, user, 100)
-
-  // // const receiver = web3.Keypair.generate().publicKey
-
-  // const receiver = new web3.PublicKey("AwPx1HBV6msLEKPm5Ao1kkcz4Fmn1hxSpxX8Mk1QetT")
-    
-  //   const receiverTokenAccount = await createTokenAccount(
-  //       connection,
-  //       user,
-  //       mint,
-  //       receiver
-  //   )
-
-  //   await transferTokens(
-  //       connection,
-  //       user,
-  //       tokenAccount.address,
-  //       receiverTokenAccount.address,
-  //       user.publicKey,
-  //       50,
-  //       mint
-  //   )
-    
-  //  await burnTokens(connection, user, tokenAccount.address, mint, user, 20)
-  
-  const MINT_ADDRESS = "5d26mdAry41dC1p3UZ1nT7BjHyACkQXWnfUjXcEFtyif"
-  
-  // metaplex setup
-  const metaplex = Metaplex.make(connection)
-    .use(keypairIdentity(user))
-    .use(
-      bundlrStorage({
-        address: "https://devnet.bundlr.network",
-        providerUrl: "https://api.devnet.solana.com",
-        timeout: 60000,
-      })
-    )
-  
-  // Calling the token 
-  await createTokenMetadata(
-    connection,
-    metaplex,
-    new web3.PublicKey(MINT_ADDRESS),
-    user,
-    "Molddova coin", // Token name - REPLACE THIS WITH YOURS
-    "MDLC",     // Token symbol - REPLACE THIS WITH YOURS
-    "Whoever holds this token is invited to my pizza party" // Token description - REPLACE THIS WITH YOURS
-  )
-
-  // Calling the token 
-  await createTokenMetadata(
-    connection,
-    metaplex,
-    new web3.PublicKey(MINT_ADDRESS),
-    user,
-    "Moldova coin", // Token name - REPLACE THIS WITH YOURS
-    "MDLC",     // Token symbol - REPLACE THIS WITH YOURS
-    "Whoever holds this token is invited to my pizza party" // Token description - REPLACE THIS WITH YOURS
-  )
-
-  // Calling the token 
-  // await updateTokenMetadata(
-  //   connection,
-  //   metaplex,
-  //   new web3.PublicKey(MINT_ADDRESS),
-  //   user,
-  //   "Moldova coin", // Token name - REPLACE THIS WITH YOURS
-  //   "MDLC",     // Token symbol - REPLACE THIS WITH YOURS
-  //   "Whoever holds this token is invited to my pizza party" // Token description - REPLACE THIS WITH YOURS
-  // )
 }
 
 main()
